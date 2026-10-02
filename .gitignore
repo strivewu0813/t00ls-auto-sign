@@ -1,0 +1,24 @@
+# ---- 敏感文件：绝对不要提交 ----
+# 真实配置（含密码 MD5 / Cookie / 钉钉 webhook 与密钥）
+config.ini
+*.ini.bak
+
+# 运行期产物
+*.log
+t00ls-state.json
+*.state.json
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
