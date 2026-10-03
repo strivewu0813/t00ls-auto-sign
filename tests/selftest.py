@@ -197,7 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"status": "success", "message": "sign_success"})
 
         # ---- 记录型端点：校验通知渠道真实发出的 payload ----
-        if path in ("/dingtalk-hook", "/wecom-hook", "/bark/KEY", "/dingtalk-error"):
+        if path in ("/dingtalk-hook", "/wecom-hook", "/bark/KEY", "/dingtalk-error",
+                    "/dingtalk-sign-only"):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length).decode("utf-8") if length else ""
             # 存完整 self.path（含 query），这样能校验加签参数
@@ -205,7 +206,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/bark/KEY":
                 return self._send({"code": 200, "message": "success"})
             if path == "/dingtalk-error":
-                return self._send({"errcode": 310000, "errmsg": "keywords not in content"})
+                return self._send({"errcode": 310000, "errmsg": "错误描述:"})
+            if path == "/dingtalk-sign-only":
+                query = parse_qs(urlsplit(self.path).query)
+                if "sign" in query and "timestamp" in query:
+                    return self._send({"errcode": 0, "errmsg": "ok"})
+                return self._send({"errcode": 310000, "errmsg": "错误描述:"})
             return self._send({"errcode": 0, "errmsg": "ok"})
 
         self._send({"status": "fail", "message": "notfound"}, 404)
@@ -1102,6 +1108,112 @@ def main():
         "22d 开了开关却没写 channels", ["-c", diag_nochan, "--show-config"], 0,
         expect=["channels = (空)", "channels 是空的", "不会推送任何通知"],
     ))
+
+    # 22e. 310000 是钉钉最含糊的错误：必须区分"本次有没有加签"（修法完全相反）
+    reset()
+    err310_nosign = os.path.join(tmp, "err310_nosign.ini")
+    write_config(err310_nosign, username="", password="", cookie="", notify=True,
+                 channels="dingtalk",
+                 hook="http://127.0.0.1:%d/dingtalk-error" % port)
+    results.append(run_case(
+        "22e 310000 且未加签 -> 提示填 dingtalk_secret",
+        ["-c", err310_nosign, "--test-notify"], 1,
+        expect=["errcode=310000", "【未加签】", "dingtalk_secret", "T00ls（区分大小写）"],
+    ))
+
+    # 22f. 已加签时给的是完全不同的建议（查密钥完整性 + 服务器时间）
+    reset()
+    err310_signed = os.path.join(tmp, "err310_signed.ini")
+    write_config(err310_signed, username="", password="", cookie="", notify=True,
+                 channels="dingtalk",
+                 hook="http://127.0.0.1:%d/dingtalk-error" % port)
+    with open(err310_signed, "a", encoding="utf-8") as fp:
+        fp.write("dingtalk_secret = SECfake123\n")
+    results.append(run_case(
+        "22f 310000 且已加签 -> 提示查密钥与服务器时间",
+        ["-c", err310_signed, "--test-notify"], 1,
+        expect=["errcode=310000", "【已加签】", "timedatectl", "留空"],
+        forbid=["【未加签】"],
+    ))
+
+    # 22g. --show-config 要能一眼看出请求形态（加签 / 未加签）
+    reset()
+    form_signed = os.path.join(tmp, "form_signed.ini")
+    write_config(form_signed, notify=True, channels="dingtalk",
+                 hook="http://127.0.0.1:%d/dingtalk-hook" % port)
+    with open(form_signed, "a", encoding="utf-8") as fp:
+        fp.write("dingtalk_secret = SECfake123\n")
+    results.append(run_case(
+        "22g 诊断显示已加签", ["-c", form_signed, "--show-config"], 0,
+        expect=["已加签", "请求会带 timestamp + sign"],
+        forbid=["SECfake123"],
+    ))
+
+    # 23. tools/dingtalk_check.py：探测机器人到底用哪种安全设置
+    print("\n--- 钉钉 Webhook 模式探测工具 ---")
+    tools_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+    sys.path.insert(0, tools_dir)
+    try:
+        import dingtalk_check as dtc
+    except ImportError as exc:
+        print("  [FAIL] 无法导入 tools/dingtalk_check.py：%s" % exc)
+        results.append(False)
+        dtc = None
+
+    if dtc is not None:
+        sign_only = "%s/dingtalk-sign-only?access_token=fake" % base
+        accept_any = "%s/dingtalk-hook?access_token=fake" % base
+
+        # 23a. 只接受加签的机器人：不加签失败、加签成功
+        plain = dtc.send(sign_only)
+        signed = dtc.send(sign_only, "SECprobe-secret")
+        print("  ① 不加签返回:", json.dumps(plain, ensure_ascii=False))
+        print("  ② 加签返回  :", json.dumps(signed, ensure_ascii=False))
+        results.append(str(plain.get("errcode")) == "310000")
+        results.append(str(signed.get("errcode")) == "0")
+        results.append("成功" in dtc.describe(signed) and "安全设置" in dtc.describe(plain))
+
+        # 23b. 探测结论要能区分"必须加签"
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = dtc.main(["--token", sign_only, "--secret", "SECprobe-secret"])
+        text = captured.getvalue()
+        print("  结论行:", [l for l in text.splitlines() if l.startswith("结论")])
+        results.append(rc == 0 and "只有【带加签】被接受" in text)
+
+        # 23c. 两种都接受的机器人（关键词模式）-> 应提示 secret 可留空
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = dtc.main(["--token", accept_any, "--secret", "SECwhatever"])
+        text = captured.getvalue()
+        print("  结论行:", [l for l in text.splitlines() if l.startswith("结论")])
+        results.append(rc == 0 and "两种方式都被接受" in text and "留空即可" in text)
+
+        # 23d. 不带 secret 探测关键词模式
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = dtc.main(["--token", accept_any])
+        text = captured.getvalue()
+        print("  结论行:", [l for l in text.splitlines() if l.startswith("结论")])
+        results.append(rc == 0 and "只有【不带加签】被接受" in text)
+
+        # 23e. 两种都被拒（IP 白名单 / token 错）-> 明确指出不支持白名单
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            rc = dtc.main(["--token", "%s/dingtalk-error?access_token=fake" % base])
+        text = captured.getvalue()
+        print("  结论行:", [l for l in text.splitlines() if l.startswith("结论")])
+        results.append(rc == 1 and "IP 白名单" in text)
+
+        # 23f. 加签 URL 的构造与主脚本保持一致（同样的算法）
+        url_tool = dtc.build_url("https://oapi.dingtalk.com/robot/send?access_token=t", "SECx")
+        url_core = t00ls_sign.Notifier.dingtalk_signed_url(
+            "https://oapi.dingtalk.com/robot/send?access_token=t", "SECx")
+        q_tool = parse_qs(urlsplit(url_tool).query)
+        q_core = parse_qs(urlsplit(url_core).query)
+        print("  工具/主脚本 sign 是否一致:", q_tool.get("sign") == q_core.get("sign"))
+        results.append(q_tool.get("access_token") == q_core.get("access_token"))
+        results.append(len(q_tool.get("timestamp", [])) == 1)
 
     # 18. 纯函数边界检查
     print("\n--- 纯函数边界 ---")

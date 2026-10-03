@@ -966,9 +966,31 @@ class Notifier(object):
         if not self.cfg.dingtalk_webhook:
             raise ConfigError("未配置 dingtalk_webhook")
         webhook = self.cfg.dingtalk_webhook
-        if self.cfg.dingtalk_secret:
+        signed = bool(self.cfg.dingtalk_secret)
+        if signed:
             webhook = self.dingtalk_signed_url(webhook, self.cfg.dingtalk_secret)
-        self._post_json(webhook, {"msgtype": "text", "text": {"content": text}}, channel="dingtalk")
+        try:
+            self._post_json(
+                webhook, {"msgtype": "text", "text": {"content": text}}, channel="dingtalk"
+            )
+        except T00lsError as exc:
+            if "310000" not in str(exc):
+                raise
+            # 310000 只说明"安全设置没通过"，钉钉不区分是关键词 / 加签 / IP 白名单，
+            # 而这两种情况的修法完全相反，所以把"本次有没有加签"一并说清楚。
+            if signed:
+                raise T00lsError(
+                    "%s。本次请求【已加签】：请确认 dingtalk_secret 是从机器人设置里复制的"
+                    "完整密钥（SEC 开头、不要带空格或引号），并检查服务器时间是否准确"
+                    "（加签允许 ±1 小时偏差，用 timedatectl 查看）；"
+                    "若机器人安全设置其实是「自定义关键词」，则应把 dingtalk_secret 留空" % exc
+                )
+            raise T00lsError(
+                "%s。本次请求【未加签】：若机器人安全设置选了「加签」，"
+                "必须把 SEC 密钥填到 config.ini 的 dingtalk_secret；"
+                "若用的是「自定义关键词」，关键词必须是 T00ls（区分大小写）；"
+                "「IP 白名单」模式本脚本不支持" % exc
+            )
 
     @staticmethod
     def dingtalk_signed_url(webhook: str, secret: str) -> str:
@@ -1278,8 +1300,8 @@ def webhook_brief(url: str) -> str:
 
 def show_config_diagnosis(cfg: Config) -> int:
     """打印生效配置与"为什么没推送"的结论。不联网、不登录、敏感值全部脱敏。"""
-    out: List[str] = []
-
+    out = []
+    out.append("脚本版本    : v%s" % __version__)
     if cfg.config_path and os.path.exists(cfg.config_path):
         out.append("配置文件    : %s（存在，%.0f 字节）" % (cfg.config_path, os.path.getsize(cfg.config_path)))
     elif cfg.config_path:
@@ -1325,6 +1347,13 @@ def show_config_diagnosis(cfg: Config) -> int:
     out.append("通知开关    : enabled = %s" % ("true" if cfg.notify_enabled else "false"))
     out.append("通知渠道    : channels = %s" % (",".join(cfg.notify_channels) or "(空)"))
     out.append("钉钉 Webhook: %s" % webhook_brief(cfg.dingtalk_webhook))
+    if cfg.dingtalk_webhook and cfg.dingtalk_secret:
+        form = "请求会带 timestamp + sign（已加签）"
+    elif cfg.dingtalk_webhook:
+        form = "请求只带 access_token（未加签）—— 机器人若开了「加签」就会返回 310000"
+    else:
+        form = "未配置 webhook"
+    out.append("钉钉请求形态: %s" % form)
     out.append("钉钉加签    : %s" % ("已配置（SEC 密钥已脱敏）" if cfg.dingtalk_secret else "未配置"))
     out.append("重复也通知  : always = %s" % ("true" if cfg.notify_always else "false"))
 

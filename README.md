@@ -1,4 +1,4 @@
-# T00ls 每日自动签到（Ubuntu）
+﻿# T00ls 每日自动签到（Ubuntu）
 
 在 Ubuntu 服务器上每天自动完成 [www.t00ls.com](https://www.t00ls.com) 的签到，支持 **钉钉/企业微信/Server酱/Bark/Telegram/邮件通知** 和 **自动补签**，以及 systemd 定时器 / crontab、失败重试。
 
@@ -12,13 +12,14 @@
 | `deploy.sh` | Ubuntu 一键部署：venv + 依赖 + systemd timer（或 cron） |
 | `config.example.ini` | 配置模板，复制成 `config.ini` 后填写 |
 | `requirements.txt` | 依赖列表（`requests`） |
-| `tests/selftest.py` | 本地自检：起 mock 接口跑 122 个场景（登录/签到/重试/Cookie/补签/通知/跳转/异常），不碰真实站点 |
+| `tools/dingtalk_check.py` | 钉钉 Webhook 模式探测工具（只用标准库）：自动分辨机器人用的是关键词还是加签 |
+| `tests/selftest.py` | 本地自检：起 mock 接口跑 134 个场景（登录/签到/重试/Cookie/补签/通知/跳转/异常），不碰真实站点 |
 
 自检用法（改完代码后可以随时验证，不会向 t00ls 发任何请求）：
 
 ```bash
 pip3 install -r requirements.txt
-python3 tests/selftest.py     # 期望最后输出 122/122 项通过
+python3 tests/selftest.py     # 期望最后输出 134/134 项通过
 ```
 
 ## 二、快速开始（推荐：一键脚本）
@@ -343,9 +344,42 @@ journalctl -u t00ls-sign -n 50 --no-pager | grep -E '通知|钉钉'
 | 钉钉返回 | 含义 | 处理 |
 | --- | --- | --- |
 | `errcode=300001` | access_token 无效 | Webhook 复制不全或机器人已被删除 |
-| `errcode=310000` | 安全设置未通过 | 关键词没填 `T00ls` / 加签密钥没填 / IP 白名单没放行 |
+| `errcode=310000` | 安全设置未通过 | **看下面的专节**：关键词没填 `T00ls` / 加签密钥没填 / IP 白名单没放行 |
 | `errcode=130101` | 发送太快被限流 | 稍后再试 |
 | `HTTP 4xx` / 超时 | 服务器出网问题 | 检查 DNS/代理（代理见第九节） |
+
+### `errcode=310000` 怎么定位（钉钉给的原因说明是空的）
+
+钉钉对 310000 通常只回一句含糊的 `errmsg`（例如`错误描述:`），不告诉你是哪一种。而三种原因的**修法正好相反**，所以必须先确定机器人用的是哪种安全设置：
+
+```bash
+PY=/opt/t00ls-sign/venv/bin/python
+
+# 第一步：看脚本本次请求的形态（加签 / 未加签）
+$PY /opt/t00ls-sign/t00ls_sign.py -c /opt/t00ls-sign/config.ini --show-config
+#   钉钉请求形态: 请求只带 access_token（未加签）—— 机器人若开了「加签」就会返回 310000
+#   钉钉请求形态: 请求会带 timestamp + sign（已加签）
+
+# 第二步：让工具自动探测机器人接受哪种模式（会真的发 1~2 条消息）
+$PY /opt/t00ls-sign/tools/dingtalk_check.py \
+     --token 'https://oapi.dingtalk.com/robot/send?access_token=你的token' \
+     --secret 'SEC你的密钥'      # 用关键词模式就省略 --secret
+```
+
+工具会分别用「不带加签」和「带加签」各发一次，并直接给结论：
+
+| 结论 | 说明 | 你要做的 |
+| --- | --- | --- |
+| 只有【不带加签】被接受 | 机器人用「自定义关键词」或没开安全设置 | `dingtalk_secret` **留空**；关键词必须是 `T00ls`（区分大小写） |
+| 只有【带加签】被接受 | 机器人用「加签」 | 必须把该密钥填进 `dingtalk_secret`，并确认服务器时间准确（`timedatectl`） |
+| 两种都被接受 | 没强制加签 | `dingtalk_secret` 留空即可 |
+| 两种都被拒绝 | 「IP 白名单」模式或 token 复制错了 | 改成关键词或加签；**IP 白名单本脚本不支持** |
+
+改完配置后自检：`$PY /opt/t00ls-sign/t00ls_sign.py -c /opt/t00ls-sign/config.ini --test-notify`
+
+> 脚本本身也会把"本次有没有加签"写进报错里，所以不看工具也能分辨：
+> `…本次请求【未加签】：若机器人安全设置选了「加签」，必须把 SEC 密钥填到 dingtalk_secret…`
+> `…本次请求【已加签】：请确认 dingtalk_secret 是完整的一整串…并检查服务器时间…`
 
 **方法三：绕开脚本，直接用 curl 验证 webhook 本身**
 
