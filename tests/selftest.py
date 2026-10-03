@@ -1057,6 +1057,52 @@ def main():
             else:
                 os.environ[k] = v
 
+    # 22. --show-config 配置诊断（定位"钉钉不推送"这类问题）
+    print("\n--- 配置诊断 --show-config ---")
+
+    # 22a. 配置齐全 -> 明确给出"已就绪"，且不碰站点、不泄漏 token
+    reset()
+    diag_ok = os.path.join(tmp, "diag_ok.ini")
+    write_config(diag_ok, notify=True, channels="dingtalk",
+                 hook="http://127.0.0.1:%d/dingtalk-hook?access_token=TOP_SECRET_TOKEN" % port)
+    results.append(run_case(
+        "22a 配置齐全时结论为已就绪", ["-c", diag_ok, "--show-config"], 0,
+        expect=["通知开关    : enabled = true", "已启用通知渠道：dingtalk", "通知已就绪"],
+        forbid=["TOP_SECRET_TOKEN"],
+    ))
+    print("       站点请求次数(应为 0):", STATE["counts"])
+    results.append(not any(k in STATE["counts"] for k in ("login", "profile", "sign")))
+
+    # 22b. 填了 webhook 却忘了开 enabled —— 最容易踩的坑
+    reset()
+    diag_bad = os.path.join(tmp, "diag_bad.ini")
+    write_config(diag_bad, channels="dingtalk",
+                 hook="http://127.0.0.1:%d/dingtalk-hook?access_token=TOP_SECRET_TOKEN" % port)
+    results.append(run_case(
+        "22b 填了 webhook 却没开 enabled", ["-c", diag_bad, "--show-config"], 0,
+        expect=["enabled = false", "不会推送任何通知", "忘了打开 enabled"],
+        forbid=["TOP_SECRET_TOKEN"],
+    ))
+
+    # 22c. 正常签到流程里也要提示这条（否则用户永远不知道通知没开）
+    reset()
+    write_config(cfg, channels="dingtalk", hook="http://127.0.0.1:%d/dingtalk-hook" % port)
+    results.append(run_case(
+        "22c 签到时会警告开关没开", ["-c", cfg, "--base-url", base], 0,
+        expect=["但 [notify] enabled = false", "完成：签到成功"],
+    ))
+    print("       实际发出的通知数(应为 0):", len(CAPTURED))
+    results.append(not CAPTURED)
+
+    # 22d. enabled=true 但没写 channels
+    reset()
+    diag_nochan = os.path.join(tmp, "diag_nochan.ini")
+    write_config(diag_nochan, notify=True)
+    results.append(run_case(
+        "22d 开了开关却没写 channels", ["-c", diag_nochan, "--show-config"], 0,
+        expect=["channels = (空)", "channels 是空的", "不会推送任何通知"],
+    ))
+
     # 18. 纯函数边界检查
     print("\n--- 纯函数边界 ---")
     unit = [

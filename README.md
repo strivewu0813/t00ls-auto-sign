@@ -12,13 +12,13 @@
 | `deploy.sh` | Ubuntu 一键部署：venv + 依赖 + systemd timer（或 cron） |
 | `config.example.ini` | 配置模板，复制成 `config.ini` 后填写 |
 | `requirements.txt` | 依赖列表（`requests`） |
-| `tests/selftest.py` | 本地自检：起 mock 接口跑 90 个场景（登录/签到/重试/Cookie/补签/通知/跳转/异常），不碰真实站点 |
+| `tests/selftest.py` | 本地自检：起 mock 接口跑 122 个场景（登录/签到/重试/Cookie/补签/通知/跳转/异常），不碰真实站点 |
 
 自检用法（改完代码后可以随时验证，不会向 t00ls 发任何请求）：
 
 ```bash
 pip3 install -r requirements.txt
-python3 tests/selftest.py     # 期望最后输出 90/90 项通过
+python3 tests/selftest.py     # 期望最后输出 122/122 项通过
 ```
 
 ## 二、快速开始（推荐：一键脚本）
@@ -140,6 +140,9 @@ bu_sign_within_days = 3                             ; 漏签超过这么多天�
 
 # 只发一条测试通知（不登录、不访问站点），用来验证钉钉等渠道
 ... t00ls_sign.py -c config.ini --test-notify
+
+# 配置诊断：打印生效配置 + "为什么没推送"的结论（脱敏、不联网、不登录）
+... t00ls_sign.py -c config.ini --show-config
 
 # 本次不补签（临时覆盖配置里的 auto_bu_sign）
 ... t00ls_sign.py -c config.ini --no-bu-sign
@@ -457,6 +460,39 @@ GET  /members-profile.json 复核补签结果与 TuBi 变化
 - 日志记录账号、结果、累计签到、TuBi、补签动作，便于事后核对。
 
 ## 九、常见问题
+
+**钉钉没有收到推送？** 按这个顺序查，一步就能定位：
+
+```bash
+PY=/opt/t00ls-sign/venv/bin/python; CFG=/opt/t00ls-sign/config.ini
+
+# 1) 配置诊断：直接告诉你"当前会不会推、卡在哪"，脱敏且不联网
+$PY /opt/t00ls-sign/t00ls_sign.py -c $CFG --show-config
+
+# 2) 结论若是"已就绪"，再真实发一条
+$PY /opt/t00ls-sign/t00ls_sign.py -c $CFG --test-notify
+
+# 3) 看定时任务到底跑没跑、报了什么
+journalctl -u t00ls-sign -n 60 --no-pager | grep -E '通知|钉钉|完成|失败'
+systemctl list-timers t00ls-sign.timer
+
+# 4) 加签模式要检查服务器时间（允许 ±1 小时）
+timedatectl
+```
+
+按出现频率排序的原因：
+
+| 现象 / 日志 | 原因 | 处理 |
+| --- | --- | --- |
+| `--show-config` 说 `enabled = false`，并提示"忘了打开 enabled" | 你填了 webhook 但没打开通知总开关（`deploy.sh` 在没填 webhook 时会生成 `enabled = false`） | `config.ini` 里改成 `enabled = true` |
+| `--show-config`/`--test-notify` 报"无法识别的参数" | 服务器上跑的还是旧版脚本 | 更新：`git pull && sudo ./deploy.sh --update` |
+| 日志里是 `完成：今日已签到，无需重复签到` | 当天已经签过（手动/App/微信），**默认不推重复通知** | 想每次都推：`always = true` |
+| `通知渠道 dingtalk 发送失败：…errmsg=keywords not in content` | 机器人安全设置没通过 | 关键词填 `T00ls`；用加签就填 `dingtalk_secret`；IP 白名单不支持 |
+| 日志里有 `通知已发送：dingtalk` 但群里没有 | 消息发到了别的群 / 机器人被移出群 | 核对机器人所在的群 |
+| 完全没有日志、`list-timers` 里没有下次触发时间 | 定时任务没启用或时间不对 | `sudo ./deploy.sh --status`、`systemctl list-timers` |
+
+**为什么"今日已签到"不推送？**
+这是刻意的防打扰设计：定时任务一天触发多次，若每次都推会变成骚扰。签到成功、签到失败、以及**发生了补签**都会推，只有"已经签过、什么都没做"这一次不推。`always = true` 可以让它每次都推。
 
 **登录失败返回数字错误码**（`login.json` 实测行为，脚本已自动翻译成人话）
 

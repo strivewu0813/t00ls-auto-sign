@@ -337,6 +337,7 @@ class State(object):
 class Config(object):
     def __init__(self) -> None:
         self.base_url: str = DEFAULT_BASE_URL
+        self.config_path: str = ""
         self.username: str = ""
         self.password: str = ""
         self.password_md5: str = ""
@@ -418,6 +419,7 @@ def load_config(path: Optional[str]) -> Config:
     if files:
         if not os.path.exists(files[0]):
             raise ConfigError("配置文件不存在：%s" % files[0])
+        cfg.config_path = os.path.abspath(files[0])
         # utf-8-sig：兼容 Windows 记事本 / PowerShell 保存时带的 UTF-8 BOM
         try:
             with open(files[0], "r", encoding="utf-8-sig") as handle:
@@ -870,7 +872,23 @@ class Notifier(object):
 
     def _resolve_channels(self) -> List[str]:
         if not self.cfg.notify_enabled:
-            # 通知没打开时不要去校验渠道配置，否则会白刷一堆警告
+            # 通知没打开时不去校验渠道，免得白刷警告；但如果用户其实已经把参数填好了，
+            # 就必须明确提醒他忘了打开开关 —— 否则"填了 webhook 却不推送"毫无线索可查。
+            filled = [
+                field for field in (
+                    "dingtalk_webhook", "wecom_webhook", "serverchan_key", "bark_url",
+                    "telegram_token", "smtp_host",
+                )
+                if str(getattr(self.cfg, field, "") or "").strip()
+            ]
+            if filled:
+                LOGGER.warning(
+                    "检测到已经填了 %s，但 [notify] enabled = false，所以不会推送任何通知；"
+                    "要开启请把 config.ini 里的 enabled 改成 true（或设环境变量 T00LS_NOTIFY_ENABLED=true）",
+                    " / ".join(filled),
+                )
+            else:
+                LOGGER.debug("通知未开启（notify.enabled = false）")
             return []
         if not self.cfg.notify_channels:
             LOGGER.info("notify.enabled = true 但没有配置 channels，本次不会发送任何通知")
@@ -1102,6 +1120,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--test-notify", action="store_true",
         help="只发一条测试通知（不登录、不访问站点），用来验证钉钉等渠道是否配好",
     )
+    parser.add_argument(
+        "--show-config", action="store_true",
+        help="打印生效配置与「为什么没有推送」的结论（脱敏、不联网、不登录）",
+    )
     parser.add_argument("--base-url", help="覆盖接口域名（默认 %s）" % DEFAULT_BASE_URL)
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     parser.add_argument("--version", action="version", version="t00ls_sign %s" % __version__)
@@ -1242,6 +1264,106 @@ def run_test_notify(cfg: Config) -> int:
     return 0
 
 
+def webhook_brief(url: str) -> str:
+    """只显示 webhook 的域名与是否带 token，绝不把 token 打进日志。"""
+    if not url:
+        return "未配置"
+    try:
+        parts = urlsplit(url)
+        keys = [k for k, _ in parse_qsl(parts.query, keep_blank_values=True)]
+        return "%s（参数：%s，值已脱敏）" % (parts.netloc or url, ",".join(keys) or "无")
+    except ValueError:
+        return "（无法解析，已脱敏）"
+
+
+def show_config_diagnosis(cfg: Config) -> int:
+    """打印生效配置与"为什么没推送"的结论。不联网、不登录、敏感值全部脱敏。"""
+    out: List[str] = []
+
+    if cfg.config_path and os.path.exists(cfg.config_path):
+        out.append("配置文件    : %s（存在，%.0f 字节）" % (cfg.config_path, os.path.getsize(cfg.config_path)))
+    elif cfg.config_path:
+        out.append("配置文件    : %s（不存在！）" % cfg.config_path)
+    else:
+        out.append("配置文件    : 未使用（只读环境变量）")
+
+    out.append("接口域名    : %s" % cfg.base_url)
+
+    if cfg.username:
+        login = "用户名 + %s（用户名 %s）" % (
+            "密码 MD5" if cfg.password_md5 else "明文密码（脚本内部转 MD5）",
+            mask(cfg.username, 3),
+        )
+    elif cfg.cookie:
+        login = "Cookie（已配置，长度 %d，值已脱敏）" % len(cfg.cookie)
+    else:
+        login = "未配置（脚本无法登录）"
+    out.append("登录方式    : %s" % login)
+    out.append("安全提问    : question_id = %d%s" % (
+        cfg.question_id, "（答案已配置）" if cfg.question_answer else ""))
+
+    state = State(cfg.state_file)
+    state.load()
+    state_bits = []
+    if os.path.exists(cfg.state_file):
+        state_bits.append("存在")
+        if state.get("last_sign_date"):
+            state_bits.append("上次签到 %s" % state.get("last_sign_date"))
+        if state.get("last_sign_times") is not None:
+            state_bits.append("累计 %s 次" % state.get("last_sign_times"))
+        if state.bu_sign_done_today(today_cst()):
+            state_bits.append("今天补签过")
+    else:
+        state_bits.append("不存在（首次运行，尚无可判断漏签的基线）")
+    out.append("状态文件    : %s（%s）" % (cfg.state_file, "，".join(state_bits)))
+
+    out.append("自动补签    : %s（漏签上限 %d 天，每天最多一次，每次 20 TuBi）" % (
+        "开启" if cfg.bu_sign else "关闭", cfg.bu_sign_within_days))
+    out.append("零点重试    : %d 次 × %g 秒" % (cfg.stale_retries, cfg.stale_wait))
+    out.append("日志文件    : %s" % (cfg.log_file or "（未设置，只输出到 stdout/日志系统）"))
+
+    out.append("通知开关    : enabled = %s" % ("true" if cfg.notify_enabled else "false"))
+    out.append("通知渠道    : channels = %s" % (",".join(cfg.notify_channels) or "(空)"))
+    out.append("钉钉 Webhook: %s" % webhook_brief(cfg.dingtalk_webhook))
+    out.append("钉钉加签    : %s" % ("已配置（SEC 密钥已脱敏）" if cfg.dingtalk_secret else "未配置"))
+    out.append("重复也通知  : always = %s" % ("true" if cfg.notify_always else "false"))
+
+    notifier = Notifier(cfg)
+    print("=" * 62)
+    print(" T00ls 签到 · 配置诊断（敏感值已脱敏，不联网）")
+    print("=" * 62)
+    for line in out:
+        print("  " + line)
+
+    print("-" * 62)
+    if notifier.ready:
+        print("  结论：通知已就绪，签到成功 / 失败 / 发生补签时会推送到：%s" % ", ".join(notifier.channels))
+        if not cfg.notify_always:
+            print("        注意：'今日已签到'（当天已签过）默认不推送，想每次都推请设 always = true")
+        return 0
+
+    problems: List[str] = []
+    if not cfg.notify_enabled:
+        problems.append("  [notify] enabled = false —— 通知总开关没打开")
+        if str(cfg.dingtalk_webhook or "").strip():
+            problems.append("  但你其实已经填了 dingtalk_webhook，多半是忘了打开 enabled（改成 true 即可）")
+    if cfg.notify_enabled and not cfg.notify_channels:
+        problems.append("  [notify] channels 是空的 —— 没指定要往哪个渠道发（填 dingtalk）")
+    for name in cfg.notify_channels:
+        required = Notifier.REQUIRED_FIELDS.get(name)
+        if required is None:
+            problems.append("  channels 里的 %s 不是支持的渠道（支持：dingtalk/wecom/serverchan/bark/telegram/mail）" % name)
+            continue
+        missing = [f for f in required if not str(getattr(cfg, f, "") or "").strip()]
+        if missing:
+            problems.append("  渠道 %s 缺少配置：%s" % (name, " / ".join(missing)))
+    print("  结论：✗ 当前不会推送任何通知。原因：")
+    for p in problems or ["  （未识别出具体原因，请核对上面的字段）"]:
+        print(p)
+    print("  修好后用这条命令自检： t00ls_sign.py -c <config.ini> --test-notify")
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     try:
         cfg = load_config(args.config)
@@ -1255,7 +1377,9 @@ def run(args: argparse.Namespace) -> int:
         cfg.bu_sign = False
     setup_logging(args.verbose, cfg.log_file)
 
-    # 只测通知时不需要账号，所以放在登录配置校验之前
+    # 只做诊断/测试的动作都不需要账号，所以放在登录配置校验之前
+    if args.show_config:
+        return show_config_diagnosis(cfg)
     if args.test_notify:
         return run_test_notify(cfg)
 
