@@ -105,6 +105,7 @@ do_update() {
   if [[ -f "${SRC_DIR}/requirements.txt" ]]; then
     install -m 644 "${SRC_DIR}/requirements.txt" "${INSTALL_DIR}/requirements.txt"
   fi
+  install_tools
   prepare_venv
   "${PY_BIN}" -m pip install --quiet -r "${INSTALL_DIR}/requirements.txt"
   c_info "依赖已确认"
@@ -141,6 +142,15 @@ ensure_python() {
   # 真正要探测的是 ensurepip 能不能用。
   if ! python3 -c 'import ensurepip' >/dev/null 2>&1; then
     install_venv_pkg || c_die "自动安装 python3-venv 失败。请手动执行：apt-get install -y python3-venv"
+  fi
+}
+
+install_tools() {
+  # 辅助工具（如 tools/dingtalk_check.py）拷进安装目录，README 里的路径才成立
+  if compgen -G "${SRC_DIR}/tools/*.py" >/dev/null 2>&1; then
+    mkdir -p "${INSTALL_DIR}/tools"
+    install -m 644 "${SRC_DIR}/tools/"*.py "${INSTALL_DIR}/tools/"
+    c_info "已安装辅助工具到 ${INSTALL_DIR}/tools/"
   fi
 }
 
@@ -447,6 +457,7 @@ main() {
   mkdir -p "${INSTALL_DIR}"
   install -m 644 "${SRC_DIR}/t00ls_sign.py" "${INSTALL_DIR}/t00ls_sign.py"
   [[ -f "${SRC_DIR}/requirements.txt" ]] && install -m 644 "${SRC_DIR}/requirements.txt" "${INSTALL_DIR}/requirements.txt"
+  install_tools
 
   c_info "创建 Python 虚拟环境并安装依赖"
   prepare_venv

@@ -1,4 +1,4 @@
-﻿# T00ls 每日自动签到（Ubuntu）
+# T00ls 每日自动签到（Ubuntu）
 
 在 Ubuntu 服务器上每天自动完成 [www.t00ls.com](https://www.t00ls.com) 的签到，支持 **钉钉/企业微信/Server酱/Bark/Telegram/邮件通知** 和 **自动补签**，以及 systemd 定时器 / crontab、失败重试。
 
@@ -365,6 +365,10 @@ $PY /opt/t00ls-sign/tools/dingtalk_check.py \
      --token 'https://oapi.dingtalk.com/robot/send?access_token=你的token' \
      --secret 'SEC你的密钥'      # 用关键词模式就省略 --secret
 ```
+
+> 这个工具只用标准库、不依赖 `requests`，也不依赖其它文件。`deploy.sh` / `--update`
+> 会把它装到 `/opt/t00ls-sign/tools/`；若提示文件不存在（还没重新部署过），
+> 直接在仓库目录里跑：`python3 tools/dingtalk_check.py --token '...' --secret 'SEC...'`
 
 工具会分别用「不带加签」和「带加签」各发一次，并直接给结论：
 
