@@ -284,11 +284,36 @@ dingtalk_secret = SECxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ### 用「加签」模式：取密钥 → 填配置 → 验证
 
 1. 钉钉群里点机器人头像 → **机器人设置 → 安全设置 → 加签** → 复制那串 `SEC` 开头的密钥（很长，注意别漏字符、别带空格）
-2. 填进 `config.ini` 的 `dingtalk_secret`，`dingtalk_webhook` 填**干净的**地址（只带 `access_token`）
-3. 验证：
+2. 填到**服务器上**的 `/opt/t00ls-sign/config.ini`，注意是 `[notify]` 节里（**不是** `[t00ls]` 节）：
 
 ```bash
-/opt/t00ls-sign/venv/bin/python /opt/t00ls-sign/t00ls_sign.py -c /opt/t00ls-sign/config.ini --test-notify
+sudo nano /opt/t00ls-sign/config.ini
+```
+
+```ini
+[t00ls]
+username = ...
+...
+
+[notify]                                  ← 必须是这一节里面
+enabled = true
+channels = dingtalk
+dingtalk_webhook = https://oapi.dingtalk.com/robot/send?access_token=xxxx
+dingtalk_secret = SEC你的密钥              ← 粘在这一行等号后面，不要加引号
+```
+
+> - 等号后面直接写密钥，**不要加引号、不要留多余空格**；写在错误的节里会被静默忽略。
+> - 如果你的 `config.ini` 里**没有** `dingtalk_secret` 这一行（旧版 `deploy.sh` 生成的配置就没有），
+>   自己加一行即可；`sudo ./deploy.sh --update` 不会碰配置，`sudo ./deploy.sh` 重装时是直接问你。
+> - 不想写进文件也可以用环境变量 `T00LS_DINGTALK_SECRET`（systemd 里用 `Environment=` 传）。
+> - 机器人如果是「自定义关键词」模式，**这一行必须留空** —— 填了反而会让请求签名不匹配。
+
+3. 验证（先看形态，再真发一条）：
+
+```bash
+PY=/opt/t00ls-sign/venv/bin/python; CFG=/opt/t00ls-sign/config.ini
+$PY /opt/t00ls-sign/t00ls_sign.py -c $CFG --show-config     # 应显示：请求会带 timestamp + sign（已加签）
+$PY /opt/t00ls-sign/t00ls_sign.py -c $CFG --test-notify     # 钉钉群里应收到一条测试消息
 ```
 
 脚本按钉钉官方算法签名（与官方文档给出的示例代码完全一致）：

@@ -197,6 +197,7 @@ write_config_interactive() {
   local qid="${T00LS_QUESTION_ID:-}" qans="${T00LS_QUESTION_ANSWER:-}"
   local cookie="${T00LS_COOKIE:-}"
   local hook="${T00LS_DINGTALK_WEBHOOK:-}"
+  local secret="${T00LS_DINGTALK_SECRET:-}"
   local bu="${T00LS_AUTO_BU_SIGN:-}"
 
   if ! has_mode --no-prompt && [[ -z "${username}" ]]; then
@@ -221,6 +222,12 @@ write_config_interactive() {
     echo " 钉钉通知（签到成功/失败都会推送，可留空以后再加）"
     echo "-------------------------------------------------------------"
     read -r -p "钉钉机器人 Webhook: " hook || true
+    if [[ -n "${hook}" ]]; then
+      echo
+      echo " 机器人安全设置是「加签」吗？是的话把 SEC 开头的密钥贴进来"
+      echo " （「自定义关键词」模式请直接回车留空；两者选错会报 errcode=310000）"
+      read -r -p "加签密钥（SEC...）: " secret || true
+    fi
     echo
     echo "-------------------------------------------------------------"
     echo " 自动补签：只有检测到漏签时才补，每天最多一次，每次消耗 20 TuBi"
@@ -229,6 +236,7 @@ write_config_interactive() {
   fi
 
   local pw_md5="" bu_flag="false" hook_line="" notify_flag="false" hook_value="${hook}"
+  local secret_value="${secret:-}"
   [[ -n "${password}" ]] && pw_md5="$(printf '%s' "${password}" | md5sum | awk '{print $1}')"
   if [[ "${bu,,}" == "y" || "${bu,,}" == "yes" || "${bu,,}" == "true" || "${bu}" == "1" ]]; then
     bu_flag="true"
@@ -237,6 +245,7 @@ write_config_interactive() {
     notify_flag="true"
   else
     hook_value=""
+    secret_value=""   # 没填 webhook 就谈不上加签
   fi
 
   # umask 077 + chmod 双保险，确保含密码 MD5 的配置文件只有属主可读
@@ -260,6 +269,7 @@ enabled = ${notify_flag}
 channels = dingtalk
 always = false
 dingtalk_webhook = ${hook_value}
+dingtalk_secret = ${secret_value}
 wecom_webhook =
 serverchan_key =
 bark_url =
